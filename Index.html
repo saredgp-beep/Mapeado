@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Centro de Monitoreo</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: 'Inter', sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: #0b1220;
+      color: #e5e7eb;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #navbar {
+      position: fixed;
+      top: 0;
+      width: 100%;
+      height: 50px;
+      background: rgba(15,23,42,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      z-index: 3000;
+    }
+
+    #navbar h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #22c55e;
+    }
+
+    #map {
+      position: fixed;
+      top: 50px;
+      left: 260px;
+      width: calc(100% - 260px);
+      height: calc(100% - 50px);
+      transition: all 0.3s ease;
+    }
+
+    #sidebar {
+      position: fixed;
+      top: 50px;
+      width: 260px;
+      height: calc(100% - 50px);
+      background: #0f172a;
+      padding: 18px;
+      border-right: 1px solid #1f2937;
+      overflow-y: auto;
+    }
+
+    #sidebar h3 {
+      font-size: 14px;
+      margin-bottom: 15px;
+      color: #9ca3af;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: none;
+      background: #111827;
+      color: white;
+      margin-bottom: 12px;
+    }
+
+    .cam-item {
+      background: #111827;
+      padding: 12px;
+      border-radius: 10px;
+      margin-bottom: 10px;
+    }
+
+    button {
+      border: none;
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .btn-ver { background: #22c55e; color: black; }
+    .btn-del { background: #ef4444; }
+
+    #toggleBtn {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: #1f2937;
+      padding: 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      z-index: 4000;
+    }
+
+    .form-popup {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+      backdrop-filter: blur(8px);
+      background: rgba(0,0,0,0.5);
+      justify-content: center;
+      align-items: center;
+      z-index: 5000;
+    }
+
+    .form-box {
+      background: #0f172a;
+      padding: 20px;
+      border-radius: 14px;
+      width: 260px;
+    }
+
+    #toast {
+      position: fixed;
+      bottom: 25px;
+      right: 25px;
+      background: #111827;
+      padding: 12px;
+      border-left: 4px solid #22c55e;
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="navbar"><h1>Centro de Monitoreo</h1></div>
+<div id="toggleBtn" onclick="toggleSidebar()">☰</div>
+
+<div id="sidebar">
+  <h3>Cámaras</h3>
+  <input id="buscador" placeholder="Buscar..." oninput="filtrar()">
+  <button onclick="exportar()">Exportar</button>
+  <div id="lista"></div>
+</div>
+
+<div id="map"></div>
+
+<div class="form-popup" id="form">
+  <div class="form-box">
+    <input id="nombre" placeholder="Nombre">
+    <input id="ip" placeholder="IP">
+
+    <!-- 🔥 ZONA -->
+    <input id="zona" placeholder="Zona (Ej: Patio, Entrada)">
+
+    <label><input type="checkbox" id="estadoCheck"> Funcional</label><br><br>
+    <button onclick="guardar()">Guardar</button>
+    <button onclick="cancelar()">Cancelar</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+
+// NORMALIZAR
+function normalizar(texto){
+  return texto.normalize("NFC");
+}
+
+// TOAST
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.innerText = msg;
+  t.style.display = "block";
+  setTimeout(()=> t.style.display="none", 2000);
+}
+
+// MAPA
+const map = L.map('map', { crs: L.CRS.Simple });
+const bounds = [[0,0],[1000,1000]];
+L.imageOverlay('plano.png', bounds).addTo(map);
+map.setView([500,500], 1);
+
+// ICONOS
+const iconoOn = L.icon({ iconUrl:'on.png', iconSize:[20,20] });
+const iconoOff = L.icon({ iconUrl:'off.png', iconSize:[20,20] });
+
+// DATA
+let camaras = JSON.parse(localStorage.getItem('camaras')) || [];
+let markers = [];
+let tempCoords = null;
+let editIndex = null;
+
+// RENDER
+function render(){
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+
+  camaras.forEach((cam,i)=>{
+    const icono = cam.estado ? iconoOn : iconoOff;
+
+    const marker = L.marker([cam.y, cam.x], { icon: icono, draggable:true }).addTo(map);
+
+    marker.on('dragend', e=>{
+      const pos = e.target.getLatLng();
+      cam.x = pos.lng;
+      cam.y = pos.lat;
+      guardarLocal();
+    });
+
+    const estadoTexto = cam.estado 
+      ? '<span style="color:#22c55e">Activa</span>' 
+      : '<span style="color:#ef4444">Inactiva</span>';
+
+    // 🔥 ZONA EN POPUP
+    marker.bindPopup(`<b>${cam.nombre}</b><br>${cam.ip}<br>Zona: ${cam.zona || "General"}<br>${estadoTexto}`);
+
+    markers.push(marker);
+  });
+}
+
+// LISTA
+function renderLista(){
+  const cont = document.getElementById('lista');
+  cont.innerHTML = '';
+
+  camaras.forEach((cam,i)=>{
+    cont.innerHTML += `
+      <div class="cam-item">
+        <b>${cam.nombre}</b><br>
+        <small>${cam.ip}</small><br>
+
+        <!-- 🔥 ZONA -->
+        <small>Zona: ${cam.zona || "General"}</small><br>
+
+        <input type="checkbox" ${cam.estado ? "checked":""}
+        onchange="toggleEstado(${i}, this.checked)"> ${cam.estado ? "Activa":"Inactiva"}<br>
+
+        <button class="btn-ver" onclick="irCamara(${i})">Ir</button>
+        <button onclick="editar(${i})">Editar</button>
+        <button class="btn-del" onclick="eliminar(${i})">X</button>
+      </div>
+    `;
+  });
+}
+
+// FILTRO 🔥
+function filtrar(){
+  const texto = document.getElementById('buscador').value.toLowerCase();
+
+  document.querySelectorAll('.cam-item').forEach((el,i)=>{
+    const cam = camaras[i];
+
+    const match =
+      cam.nombre.toLowerCase().includes(texto) ||
+      cam.ip.includes(texto) ||
+      (cam.zona || "").toLowerCase().includes(texto);
+
+    el.style.display = match ? 'block':'none';
+  });
+}
+
+// CLICK MAPA
+map.on('click', e=>{
+  tempCoords = e.latlng;
+  editIndex = null;
+  document.getElementById('form').style.display='flex';
+});
+
+// GUARDAR
+function guardar(){
+  let nombre = normalizar(document.getElementById('nombre').value);
+  let ip = normalizar(document.getElementById('ip').value);
+
+  // 🔥 ZONA
+  let zona = normalizar(document.getElementById('zona').value) || "General";
+
+  let estado = document.getElementById('estadoCheck').checked;
+
+  if(!nombre || !ip) return toast("Completa los campos");
+  if(!tempCoords && editIndex===null) return toast("Haz clic en el mapa");
+
+  if(editIndex!==null){
+    camaras[editIndex].nombre = nombre;
+    camaras[editIndex].ip = ip;
+    camaras[editIndex].estado = estado;
+    camaras[editIndex].zona = zona; // 🔥
+  } else {
+    camaras.push({ nombre, ip, zona, estado, x:tempCoords.lng, y:tempCoords.lat }); // 🔥
+  }
+
+  guardarLocal();
+  cerrarForm();
+  toast("Camara guardada");
+}
+
+// EDITAR
+function editar(i){
+  editIndex=i;
+
+  document.getElementById('nombre').value=camaras[i].nombre;
+  document.getElementById('ip').value=camaras[i].ip;
+  document.getElementById('estadoCheck').checked=camaras[i].estado;
+
+  // 🔥 ZONA
+  document.getElementById('zona').value=camaras[i].zona || "";
+
+  tempCoords = { lat:camaras[i].y, lng:camaras[i].x };
+
+  document.getElementById('form').style.display='flex';
+}
+
+// RESTO IGUAL
+function toggleEstado(i,estado){
+  camaras[i].estado=estado;
+  guardarLocal();
+}
+
+function guardarLocal(){
+  localStorage.setItem('camaras', JSON.stringify(camaras));
+  render();
+  renderLista();
+}
+
+function eliminar(i){
+  if(confirm("Eliminar camara?")){
+    camaras.splice(i,1);
+    guardarLocal();
+  }
+}
+
+function irCamara(i){
+  const c=camaras[i];
+  map.flyTo([c.y,c.x],2);
+}
+
+function toggleSidebar(){
+  const s=document.getElementById('sidebar');
+  if(s.style.display==="none"){
+    s.style.display="block";
+    map.getContainer().style.left="260px";
+  }else{
+    s.style.display="none";
+    map.getContainer().style.left="0";
+  }
+  setTimeout(()=> map.invalidateSize(),200);
+}
+
+function cerrarForm(){
+  document.getElementById('form').style.display='none';
+  document.getElementById('nombre').value="";
+  document.getElementById('ip').value="";
+  document.getElementById('zona').value=""; // 🔥
+  document.getElementById('estadoCheck').checked=false;
+  tempCoords=null;
+  editIndex=null;
+}
+
+function cancelar(){
+  cerrarForm();
+}
+
+// EXPORTAR
+function exportar(){
+  const data = JSON.stringify(camaras);
+  const blob = new Blob([data], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "camaras.json";
+  a.click();
+}
+
+// INIT
+render();
+renderLista();
+
+</script>
+
+</body>
+</html>
